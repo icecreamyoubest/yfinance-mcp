@@ -6,67 +6,69 @@ on:
       - main
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
-  sync-to-huggingface:
+  sync-to-hf:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout GitHub repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          lfs: true
 
-      - name: Install Hugging Face Hub
+      - name: Validate required configuration
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_REPO_VAR: ${{ vars.HF_SPACE_REPO }}
+          HF_SPACE_REPO_SECRET: ${{ secrets.HF_SPACE_REPO }}
         run: |
-          python -m pip install --upgrade pip
-          pip install --upgrade huggingface_hub
-
-      - name: Validate required secrets
-        run: |
-          if [ -z "${{ secrets.HF_TOKEN }}" ]; then
+          if [ -z "$HF_TOKEN" ]; then
             echo "Missing required GitHub secret: HF_TOKEN"
             exit 1
           fi
-          if [ -z "${{ vars.HF_SPACE_REPO }}" ]; then
-            echo "Missing required GitHub variable: HF_SPACE_REPO, example: username/yfinance-mcp-service"
+
+          HF_SPACE_REPO="${HF_SPACE_REPO_VAR:-$HF_SPACE_REPO_SECRET}"
+
+          if [ -z "$HF_SPACE_REPO" ]; then
+            echo "Missing HF_SPACE_REPO."
+            echo "Set it as either:"
+            echo "1. Repository Variable: HF_SPACE_REPO=username/space-name"
+            echo "2. Repository Secret: HF_SPACE_REPO=username/space-name"
             exit 1
           fi
 
-      - name: Upload repository to Hugging Face Space
+          echo "HF_SPACE_REPO=$HF_SPACE_REPO" >> "$GITHUB_ENV"
+
+      - name: Install git-lfs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-lfs
+          git lfs install
+
+      - name: Clone Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_SPACE_REPO: ${{ vars.HF_SPACE_REPO }}
         run: |
-          python - <<'PY'
-          import os
-          from huggingface_hub import HfApi
+          git clone https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO} hf-space
 
-          token = os.environ["HF_TOKEN"]
-          repo_id = os.environ["HF_SPACE_REPO"]
+      - name: Sync files to Hugging Face Space
+        run: |
+          rsync -av --delete \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "hf-space" \
+            ./ hf-space/
 
-          ignore_patterns = [
-              ".git/*",
-              ".github/*",
-              "__pycache__/*",
-              "*.pyc",
-              ".env",
-              ".venv/*",
-              "venv/*",
-              ".DS_Store",
-          ]
+      - name: Commit and push to Hugging Face Space
+        working-directory: hf-space
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
 
-          api = HfApi(token=token)
-          api.upload_folder(
-              folder_path=".",
-              repo_id=repo_id,
-              repo_type="space",
-              ignore_patterns=ignore_patterns,
-              commit_message="Sync from GitHub Actions",
-          )
+          git add .
 
-          print(f"Synced current GitHub repository to Hugging Face Space: {repo_id}")
-          PY
+          if git diff --cached --quiet; then
+            echo "No changes to sync."
+            exit 0
+          fi
+
+          git commit -m "Sync from GitHub Actions"
+          git push

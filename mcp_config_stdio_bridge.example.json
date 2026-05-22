@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "hf-yfinance": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://<your-username>-<your-space-name>.hf.space/gradio_api/mcp/sse",
+        "--transport",
+        "sse-only"
+      ]
+    }
+  }
+}

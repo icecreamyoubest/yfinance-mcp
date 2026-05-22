@@ -1,3 +1,17 @@
+"""
+Yahoo Finance MCP Server for Hugging Face Spaces - Gradio MCP Style
+
+Runtime style:
+- Hugging Face Space SDK: Gradio
+- MCP endpoint: /gradio_api/mcp/ and /gradio_api/mcp/sse
+- Launch: demo.launch(mcp_server=True)
+
+This app intentionally avoids FastMCP's standalone /mcp transport because
+Hugging Face Spaces commonly exposes Gradio MCP servers through /gradio_api/mcp/.
+"""
+
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -7,38 +21,62 @@ from typing import Any, Dict, List, Optional
 import gradio as gr
 import yfinance as yf
 
-
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-logger = logging.getLogger("yfinance-mcp-gradio")
+logger = logging.getLogger("yfinance-gradio-mcp")
 
 
-def _json(data: Dict[str, Any] | List[Any]) -> str:
-    """Return pretty JSON string."""
+# -----------------------------------------------------------------------------
+# Utility helpers
+# -----------------------------------------------------------------------------
+
+
+def to_json(data: Any) -> str:
+    """Serialize data to stable pretty JSON."""
     return json.dumps(data, ensure_ascii=False, indent=2, default=str)
 
 
-def _normalize_ticker(ticker: str) -> str:
-    if not ticker:
-        return ""
-    return ticker.strip().upper()
+def normalize_ticker(ticker: str) -> str:
+    """Normalize user ticker input for Yahoo Finance."""
+    return (ticker or "").strip().upper()
 
 
-def _safe_float(value: Any) -> Optional[float]:
+def parse_ticker_list(tickers: str) -> List[str]:
+    """Parse comma/newline/space separated tickers into a clean list."""
+    if not tickers:
+        return []
+
+    raw = tickers.replace("\n", ",").replace(";", ",").split(",")
+    parsed: List[str] = []
+
+    for item in raw:
+        item = item.strip()
+        if not item:
+            continue
+        # Also support accidental space-separated input such as "AAPL MSFT NVDA".
+        for sub in item.split():
+            normalized = normalize_ticker(sub)
+            if normalized and normalized not in parsed:
+                parsed.append(normalized)
+
+    return parsed[:10]
+
+
+def safe_float(value: Any) -> Optional[float]:
     try:
         if value is None:
             return None
-        value = float(value)
-        if value != value:
+        number = float(value)
+        if number != number:  # NaN check
             return None
-        return value
+        return number
     except Exception:
         return None
 
 
-def _safe_int(value: Any) -> Optional[int]:
+def safe_int(value: Any) -> Optional[int]:
     try:
         if value is None:
             return None
@@ -47,9 +85,35 @@ def _safe_int(value: Any) -> Optional[int]:
         return None
 
 
-def _get_info(ticker: str) -> Dict[str, Any]:
+def safe_money(value: Any, currency: str = "USD") -> str:
+    number = safe_float(value)
+    if number is None:
+        return "unknown"
+    return f"{currency} {number:,.2f}"
+
+
+def safe_market_cap(value: Any, currency: str = "USD") -> str:
+    number = safe_int(value)
+    if number is None:
+        return "unknown"
+    return f"{currency} {number:,}"
+
+
+def safe_percent(value: Any) -> Optional[str]:
+    number = safe_float(value)
+    if number is None:
+        return None
+    return f"{number * 100:.2f}%"
+
+
+def yahoo_info(ticker: str) -> Dict[str, Any]:
     stock = yf.Ticker(ticker)
     return stock.info or {}
+
+
+# -----------------------------------------------------------------------------
+# MCP-exposed functions
+# -----------------------------------------------------------------------------
 
 
 def health_check() -> str:
@@ -57,18 +121,14 @@ def health_check() -> str:
     Check whether the Yahoo Finance MCP server is running.
 
     Returns:
-        A JSON string containing service status, timestamp, transport style, and Hugging Face MCP endpoint hints.
+        JSON string with service status, runtime style, and expected MCP paths.
     """
-    return _json(
+    return to_json(
         {
             "ok": True,
-            "service": "Yahoo Finance MCP Server on Hugging Face Spaces",
-            "runtime": "gradio",
-            "mcp_style": "huggingface-gradio-mcp",
-            "mcp_endpoints": [
-                "/gradio_api/mcp/",
-                "/gradio_api/mcp/sse",
-            ],
+            "service": "Yahoo Finance Gradio MCP Server",
+            "runtime": "huggingface-spaces-gradio",
+            "mcp_endpoints": ["/gradio_api/mcp/", "/gradio_api/mcp/sse"],
             "timestamp": int(time.time()),
         }
     )
@@ -76,24 +136,22 @@ def health_check() -> str:
 
 def get_stock_quote(ticker: str) -> str:
     """
-    Get the latest available stock quote and basic company financial metrics.
+    Get latest available quote and core financial metrics for a stock.
 
     Args:
-        ticker: Stock ticker symbol, for example AAPL, NVDA, MSFT, TSLA, or 0700.HK.
+        ticker: Yahoo Finance ticker, for example AAPL, NVDA, MSFT, TSLA, or 0700.HK.
 
     Returns:
-        A JSON string containing latest available price, daily range, market cap, PE ratio, sector, industry, and business summary.
+        JSON string containing quote, market cap, PE ratios, sector, industry, and business summary.
     """
-    ticker = _normalize_ticker(ticker)
-
+    ticker = normalize_ticker(ticker)
     if not ticker:
-        return _json({"ok": False, "error": "ticker is required", "example": "AAPL"})
+        return to_json({"ok": False, "error": "ticker is required", "example": "AAPL"})
 
     try:
-        info = _get_info(ticker)
-
+        info = yahoo_info(ticker)
         if not info:
-            return _json(
+            return to_json(
                 {
                     "ok": False,
                     "ticker": ticker,
@@ -108,117 +166,114 @@ def get_stock_quote(ticker: str) -> str:
             or info.get("previousClose")
         )
 
-        result = {
-            "ok": True,
-            "ticker": ticker,
-            "company_name": info.get("longName") or info.get("shortName") or "unknown",
-            "exchange": info.get("exchange") or "unknown",
-            "quote_type": info.get("quoteType") or "unknown",
-            "currency": currency,
-            "current_price": _safe_float(current_price),
-            "previous_close": _safe_float(info.get("previousClose")),
-            "open": _safe_float(info.get("open")),
-            "day_high": _safe_float(info.get("dayHigh")),
-            "day_low": _safe_float(info.get("dayLow")),
-            "fifty_two_week_high": _safe_float(info.get("fiftyTwoWeekHigh")),
-            "fifty_two_week_low": _safe_float(info.get("fiftyTwoWeekLow")),
-            "market_cap": _safe_int(info.get("marketCap")),
-            "trailing_pe": info.get("trailingPE"),
-            "forward_pe": info.get("forwardPE"),
-            "price_to_book": info.get("priceToBook"),
-            "dividend_yield": info.get("dividendYield"),
-            "beta": info.get("beta"),
-            "sector": info.get("sector") or "unknown",
-            "industry": info.get("industry") or "unknown",
-            "website": info.get("website") or "unknown",
-            "business_summary": (info.get("longBusinessSummary") or "")[:900],
-            "data_source": "Yahoo Finance via yfinance",
-            "disclaimer": "Market data may be delayed or incomplete. This is not financial advice.",
-        }
-
-        return _json(result)
+        return to_json(
+            {
+                "ok": True,
+                "ticker": ticker,
+                "company_name": info.get("longName") or info.get("shortName") or "unknown",
+                "exchange": info.get("exchange") or "unknown",
+                "quote_type": info.get("quoteType") or "unknown",
+                "currency": currency,
+                "current_price": safe_money(current_price, currency),
+                "previous_close": safe_money(info.get("previousClose"), currency),
+                "open": safe_money(info.get("open"), currency),
+                "day_high": safe_money(info.get("dayHigh"), currency),
+                "day_low": safe_money(info.get("dayLow"), currency),
+                "fifty_two_week_high": safe_money(info.get("fiftyTwoWeekHigh"), currency),
+                "fifty_two_week_low": safe_money(info.get("fiftyTwoWeekLow"), currency),
+                "market_cap": safe_market_cap(info.get("marketCap"), currency),
+                "trailing_pe": info.get("trailingPE"),
+                "forward_pe": info.get("forwardPE"),
+                "price_to_book": info.get("priceToBook"),
+                "dividend_yield": safe_percent(info.get("dividendYield")),
+                "beta": info.get("beta"),
+                "sector": info.get("sector") or "unknown",
+                "industry": info.get("industry") or "unknown",
+                "website": info.get("website") or "unknown",
+                "business_summary": (info.get("longBusinessSummary") or "")[:900],
+                "data_source": "Yahoo Finance via yfinance",
+                "disclaimer": "Market data may be delayed or incomplete. Not financial advice.",
+            }
+        )
 
     except Exception as exc:
         logger.exception("get_stock_quote failed for ticker=%s", ticker)
-        return _json(
+        return to_json(
             {
                 "ok": False,
                 "ticker": ticker,
                 "error": str(exc),
-                "hint": "Check ticker format, for example AAPL, NVDA, MSFT, or 0700.HK.",
+                "hint": "Use Yahoo Finance ticker format, e.g. AAPL, NVDA, MSFT, 0700.HK.",
             }
         )
 
 
 def get_company_profile(ticker: str) -> str:
     """
-    Get company profile, business summary, sector, industry, country, website, and employee count.
+    Get company profile information for a stock.
 
     Args:
-        ticker: Stock ticker symbol, for example AAPL, NVDA, MSFT, TSLA, or 0700.HK.
+        ticker: Yahoo Finance ticker, for example AAPL, NVDA, MSFT, or 0700.HK.
 
     Returns:
-        A JSON string containing company profile and business description.
+        JSON string containing country, city, website, sector, industry, employees, and business summary.
     """
-    ticker = _normalize_ticker(ticker)
-
+    ticker = normalize_ticker(ticker)
     if not ticker:
-        return _json({"ok": False, "error": "ticker is required", "example": "AAPL"})
+        return to_json({"ok": False, "error": "ticker is required", "example": "AAPL"})
 
     try:
-        info = _get_info(ticker)
-
-        result = {
-            "ok": True,
-            "ticker": ticker,
-            "company_name": info.get("longName") or info.get("shortName") or "unknown",
-            "country": info.get("country") or "unknown",
-            "city": info.get("city") or "unknown",
-            "address": info.get("address1") or "unknown",
-            "website": info.get("website") or "unknown",
-            "sector": info.get("sector") or "unknown",
-            "industry": info.get("industry") or "unknown",
-            "full_time_employees": info.get("fullTimeEmployees"),
-            "phone": info.get("phone") or "unknown",
-            "business_summary": info.get("longBusinessSummary") or "unknown",
-            "data_source": "Yahoo Finance via yfinance",
-        }
-
-        return _json(result)
-
+        info = yahoo_info(ticker)
+        return to_json(
+            {
+                "ok": True,
+                "ticker": ticker,
+                "company_name": info.get("longName") or info.get("shortName") or "unknown",
+                "country": info.get("country") or "unknown",
+                "city": info.get("city") or "unknown",
+                "address": info.get("address1") or "unknown",
+                "website": info.get("website") or "unknown",
+                "sector": info.get("sector") or "unknown",
+                "industry": info.get("industry") or "unknown",
+                "full_time_employees": info.get("fullTimeEmployees"),
+                "phone": info.get("phone") or "unknown",
+                "business_summary": info.get("longBusinessSummary") or "unknown",
+                "data_source": "Yahoo Finance via yfinance",
+            }
+        )
     except Exception as exc:
         logger.exception("get_company_profile failed for ticker=%s", ticker)
-        return _json({"ok": False, "ticker": ticker, "error": str(exc)})
+        return to_json({"ok": False, "ticker": ticker, "error": str(exc)})
 
 
 def get_stock_history(ticker: str, period: str = "5d", interval: str = "1d", limit: int = 20) -> str:
     """
-    Get recent historical OHLCV market data.
+    Get recent historical OHLCV data for a stock.
 
     Args:
-        ticker: Stock ticker symbol, for example AAPL, NVDA, MSFT, TSLA, or 0700.HK.
+        ticker: Yahoo Finance ticker, for example AAPL, NVDA, MSFT, or 0700.HK.
         period: Data period, for example 1d, 5d, 1mo, 3mo, 6mo, 1y, or 5y.
         interval: Data interval, for example 1m, 5m, 15m, 1h, 1d, or 1wk.
-        limit: Maximum number of rows to return. The value is capped at 100.
+        limit: Maximum rows to return. Range is clamped to 1-100.
 
     Returns:
-        A JSON string containing historical OHLCV rows.
+        JSON string containing historical OHLCV rows.
     """
-    ticker = _normalize_ticker(ticker)
+    ticker = normalize_ticker(ticker)
     if not ticker:
-        return _json({"ok": False, "error": "ticker is required", "example": "AAPL"})
+        return to_json({"ok": False, "error": "ticker is required", "example": "AAPL"})
 
     try:
-        limit = max(1, min(int(limit), 100))
+        limit_int = max(1, min(int(limit), 100))
     except Exception:
-        limit = 20
+        limit_int = 20
 
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period=period, interval=interval)
 
         if hist.empty:
-            return _json(
+            return to_json(
                 {
                     "ok": False,
                     "ticker": ticker,
@@ -229,19 +284,19 @@ def get_stock_history(ticker: str, period: str = "5d", interval: str = "1d", lim
             )
 
         rows = []
-        for idx, row in hist.tail(limit).iterrows():
+        for idx, row in hist.tail(limit_int).iterrows():
             rows.append(
                 {
                     "datetime": str(idx),
-                    "open": _safe_float(row.get("Open")),
-                    "high": _safe_float(row.get("High")),
-                    "low": _safe_float(row.get("Low")),
-                    "close": _safe_float(row.get("Close")),
-                    "volume": _safe_int(row.get("Volume")),
+                    "open": safe_float(row.get("Open")),
+                    "high": safe_float(row.get("High")),
+                    "low": safe_float(row.get("Low")),
+                    "close": safe_float(row.get("Close")),
+                    "volume": safe_int(row.get("Volume")),
                 }
             )
 
-        return _json(
+        return to_json(
             {
                 "ok": True,
                 "ticker": ticker,
@@ -252,10 +307,9 @@ def get_stock_history(ticker: str, period: str = "5d", interval: str = "1d", lim
                 "data_source": "Yahoo Finance via yfinance",
             }
         )
-
     except Exception as exc:
         logger.exception("get_stock_history failed for ticker=%s", ticker)
-        return _json(
+        return to_json(
             {
                 "ok": False,
                 "ticker": ticker,
@@ -266,30 +320,31 @@ def get_stock_history(ticker: str, period: str = "5d", interval: str = "1d", lim
         )
 
 
-def compare_stocks(tickers_csv: str) -> str:
+def compare_stocks(tickers: str) -> str:
     """
-    Compare multiple stocks by price, market cap, PE ratio, sector, industry, and beta.
+    Compare multiple stocks by valuation, market cap, beta, sector, and industry.
 
     Args:
-        tickers_csv: Comma-separated stock tickers, for example AAPL,MSFT,NVDA.
+        tickers: Comma-separated Yahoo Finance tickers, for example AAPL,MSFT,NVDA.
 
     Returns:
-        A JSON string containing a comparison table for the requested tickers.
+        JSON string containing a comparison table for up to 10 tickers.
     """
-    if not tickers_csv:
-        return _json({"ok": False, "error": "tickers_csv is required", "example": "AAPL,MSFT,NVDA"})
+    ticker_list = parse_ticker_list(tickers)
+    if not ticker_list:
+        return to_json(
+            {
+                "ok": False,
+                "error": "tickers are required",
+                "example": "AAPL,MSFT,NVDA",
+            }
+        )
 
-    tickers = [_normalize_ticker(t) for t in tickers_csv.split(",") if _normalize_ticker(t)]
-    tickers = tickers[:10]
-
-    if not tickers:
-        return _json({"ok": False, "error": "No valid tickers provided."})
-
-    results = []
-
-    for ticker in tickers:
+    results: List[Dict[str, Any]] = []
+    for ticker in ticker_list:
         try:
-            info = _get_info(ticker)
+            info = yahoo_info(ticker)
+            currency = info.get("currency") or "USD"
             current_price = (
                 info.get("currentPrice")
                 or info.get("regularMarketPrice")
@@ -300,9 +355,9 @@ def compare_stocks(tickers_csv: str) -> str:
                     "ok": True,
                     "ticker": ticker,
                     "company_name": info.get("longName") or info.get("shortName") or "unknown",
-                    "currency": info.get("currency") or "USD",
-                    "current_price": _safe_float(current_price),
-                    "market_cap": _safe_int(info.get("marketCap")),
+                    "currency": currency,
+                    "current_price": safe_float(current_price),
+                    "market_cap": safe_int(info.get("marketCap")),
                     "trailing_pe": info.get("trailingPE"),
                     "forward_pe": info.get("forwardPE"),
                     "price_to_book": info.get("priceToBook"),
@@ -315,49 +370,48 @@ def compare_stocks(tickers_csv: str) -> str:
             logger.exception("compare_stocks failed for ticker=%s", ticker)
             results.append({"ok": False, "ticker": ticker, "error": str(exc)})
 
-    return _json(
+    return to_json(
         {
             "ok": True,
-            "tickers": tickers,
+            "tickers": ticker_list,
             "results": results,
             "data_source": "Yahoo Finance via yfinance",
-            "disclaimer": "Market data may be delayed or incomplete. This is not financial advice.",
+            "disclaimer": "Market data may be delayed or incomplete. Not financial advice.",
         }
     )
 
 
 def get_financial_risk_snapshot(ticker: str) -> str:
     """
-    Generate a basic financial risk snapshot using valuation, leverage, liquidity, profitability, growth, and volatility indicators.
+    Generate a basic financial risk snapshot using Yahoo Finance indicators.
 
     Args:
-        ticker: Stock ticker symbol, for example AAPL, NVDA, MSFT, TSLA, or 0700.HK.
+        ticker: Yahoo Finance ticker, for example AAPL, NVDA, MSFT, TSLA, or 0700.HK.
 
     Returns:
-        A JSON string containing risk indicators and simple rule-based risk flags.
+        JSON string containing valuation, volatility, leverage, liquidity, profitability, growth, and rule-based risk flags.
     """
-    ticker = _normalize_ticker(ticker)
+    ticker = normalize_ticker(ticker)
     if not ticker:
-        return _json({"ok": False, "error": "ticker is required", "example": "AAPL"})
+        return to_json({"ok": False, "error": "ticker is required", "example": "AAPL"})
 
     try:
-        info = _get_info(ticker)
+        info = yahoo_info(ticker)
 
-        beta = _safe_float(info.get("beta"))
-        trailing_pe = _safe_float(info.get("trailingPE"))
-        forward_pe = _safe_float(info.get("forwardPE"))
-        debt_to_equity = _safe_float(info.get("debtToEquity"))
-        profit_margins = _safe_float(info.get("profitMargins"))
-        operating_margins = _safe_float(info.get("operatingMargins"))
-        current_ratio = _safe_float(info.get("currentRatio"))
-        quick_ratio = _safe_float(info.get("quickRatio"))
-        revenue_growth = _safe_float(info.get("revenueGrowth"))
-        earnings_growth = _safe_float(info.get("earningsGrowth"))
+        beta = safe_float(info.get("beta"))
+        trailing_pe = safe_float(info.get("trailingPE"))
+        forward_pe = safe_float(info.get("forwardPE"))
+        debt_to_equity = safe_float(info.get("debtToEquity"))
+        profit_margins = safe_float(info.get("profitMargins"))
+        operating_margins = safe_float(info.get("operatingMargins"))
+        current_ratio = safe_float(info.get("currentRatio"))
+        quick_ratio = safe_float(info.get("quickRatio"))
+        revenue_growth = safe_float(info.get("revenueGrowth"))
+        earnings_growth = safe_float(info.get("earningsGrowth"))
 
-        risk_flags = []
-
+        risk_flags: List[str] = []
         if beta is not None and beta > 1.5:
-            risk_flags.append("High beta: the stock may be more volatile than the broader market.")
+            risk_flags.append("High beta: stock may be more volatile than the broader market.")
         if trailing_pe is not None and trailing_pe > 50:
             risk_flags.append("High trailing PE: valuation may be expensive relative to earnings.")
         if debt_to_equity is not None and debt_to_equity > 150:
@@ -370,11 +424,10 @@ def get_financial_risk_snapshot(ticker: str) -> str:
             risk_flags.append("Negative revenue growth: sales are contracting.")
         if earnings_growth is not None and earnings_growth < 0:
             risk_flags.append("Negative earnings growth: profitability trend may be weakening.")
-
         if not risk_flags:
-            risk_flags.append("No major risk flags detected from the available Yahoo Finance indicators.")
+            risk_flags.append("No major risk flags detected from available Yahoo Finance indicators.")
 
-        return _json(
+        return to_json(
             {
                 "ok": True,
                 "ticker": ticker,
@@ -408,39 +461,40 @@ def get_financial_risk_snapshot(ticker: str) -> str:
                 },
                 "risk_flags": risk_flags,
                 "data_source": "Yahoo Finance via yfinance",
-                "disclaimer": "This is not financial advice. It is a simple data-driven risk snapshot.",
+                "disclaimer": "This is not financial advice. It is a simple data-driven risk snapshot and may be incomplete or delayed.",
             }
         )
-
     except Exception as exc:
         logger.exception("get_financial_risk_snapshot failed for ticker=%s", ticker)
-        return _json({"ok": False, "ticker": ticker, "error": str(exc)})
+        return to_json({"ok": False, "ticker": ticker, "error": str(exc)})
 
 
-with gr.Blocks(
-    title="Yahoo Finance MCP Server",
-    theme=gr.themes.Soft(),
-) as demo:
+# -----------------------------------------------------------------------------
+# Gradio UI + API endpoints. Each button click with api_name becomes an API route.
+# With launch(mcp_server=True), Gradio exposes these routes as MCP tools.
+# -----------------------------------------------------------------------------
+
+with gr.Blocks(title="Yahoo Finance MCP Server") as demo:
     gr.Markdown(
         """
 # Yahoo Finance MCP Server
 
-This Hugging Face Space exposes Yahoo Finance tools as a **Gradio MCP Server**.
+This Hugging Face Space exposes stock tools as a **Gradio MCP server**.
 
-MCP endpoints after deployment:
+Expected MCP endpoints after deployment:
 
 ```text
-https://<user>-<space>.hf.space/gradio_api/mcp/
-https://<user>-<space>.hf.space/gradio_api/mcp/sse
+/gradio_api/mcp/
+/gradio_api/mcp/sse
 ```
 
-Use the tabs below for manual UI testing. MCP clients can discover and call the same tools.
-"""
+Use this Space from MCP-compatible clients such as OpenAI remote MCP, Cursor, Claude Desktop bridge, or MCP Inspector.
+        """
     )
 
-    with gr.Tab("Health Check"):
-        health_output = gr.Code(label="Result", language="json")
+    with gr.Tab("Health"):
         health_btn = gr.Button("Run health_check")
+        health_output = gr.Code(label="health_check output", language="json")
         health_btn.click(
             fn=health_check,
             inputs=[],
@@ -450,70 +504,81 @@ Use the tabs below for manual UI testing. MCP clients can discover and call the 
 
     with gr.Tab("Stock Quote"):
         quote_ticker = gr.Textbox(label="Ticker", value="NVDA", placeholder="AAPL, NVDA, MSFT, 0700.HK")
-        quote_output = gr.Code(label="Result", language="json")
-        quote_btn = gr.Button("Run get_stock_quote")
+        quote_btn = gr.Button("Get stock quote")
+        quote_output = gr.Code(label="get_stock_quote output", language="json")
         quote_btn.click(
             fn=get_stock_quote,
-            inputs=quote_ticker,
+            inputs=[quote_ticker],
             outputs=quote_output,
             api_name="get_stock_quote",
         )
 
     with gr.Tab("Company Profile"):
-        profile_ticker = gr.Textbox(label="Ticker", value="AAPL")
-        profile_output = gr.Code(label="Result", language="json")
-        profile_btn = gr.Button("Run get_company_profile")
+        profile_ticker = gr.Textbox(label="Ticker", value="AAPL", placeholder="AAPL, NVDA, MSFT, 0700.HK")
+        profile_btn = gr.Button("Get company profile")
+        profile_output = gr.Code(label="get_company_profile output", language="json")
         profile_btn.click(
             fn=get_company_profile,
-            inputs=profile_ticker,
+            inputs=[profile_ticker],
             outputs=profile_output,
             api_name="get_company_profile",
         )
 
-    with gr.Tab("Stock History"):
-        history_ticker = gr.Textbox(label="Ticker", value="AAPL")
-        history_period = gr.Textbox(label="Period", value="5d")
-        history_interval = gr.Textbox(label="Interval", value="1d")
-        history_limit = gr.Number(label="Limit", value=20, precision=0)
-        history_output = gr.Code(label="Result", language="json")
-        history_btn = gr.Button("Run get_stock_history")
-        history_btn.click(
+    with gr.Tab("History"):
+        hist_ticker = gr.Textbox(label="Ticker", value="AAPL")
+        hist_period = gr.Dropdown(
+            label="Period",
+            choices=["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"],
+            value="5d",
+        )
+        hist_interval = gr.Dropdown(
+            label="Interval",
+            choices=["1m", "5m", "15m", "30m", "1h", "1d", "1wk"],
+            value="1d",
+        )
+        hist_limit = gr.Number(label="Limit", value=20, precision=0)
+        hist_btn = gr.Button("Get stock history")
+        hist_output = gr.Code(label="get_stock_history output", language="json")
+        hist_btn.click(
             fn=get_stock_history,
-            inputs=[history_ticker, history_period, history_interval, history_limit],
-            outputs=history_output,
+            inputs=[hist_ticker, hist_period, hist_interval, hist_limit],
+            outputs=hist_output,
             api_name="get_stock_history",
         )
 
-    with gr.Tab("Compare Stocks"):
-        compare_input = gr.Textbox(label="Tickers CSV", value="AAPL,MSFT,NVDA")
-        compare_output = gr.Code(label="Result", language="json")
-        compare_btn = gr.Button("Run compare_stocks")
+    with gr.Tab("Compare"):
+        compare_tickers = gr.Textbox(label="Tickers", value="AAPL,MSFT,NVDA", placeholder="AAPL,MSFT,NVDA")
+        compare_btn = gr.Button("Compare stocks")
+        compare_output = gr.Code(label="compare_stocks output", language="json")
         compare_btn.click(
             fn=compare_stocks,
-            inputs=compare_input,
+            inputs=[compare_tickers],
             outputs=compare_output,
             api_name="compare_stocks",
         )
 
     with gr.Tab("Risk Snapshot"):
-        risk_ticker = gr.Textbox(label="Ticker", value="TSLA")
-        risk_output = gr.Code(label="Result", language="json")
-        risk_btn = gr.Button("Run get_financial_risk_snapshot")
+        risk_ticker = gr.Textbox(label="Ticker", value="TSLA", placeholder="AAPL, NVDA, TSLA")
+        risk_btn = gr.Button("Get financial risk snapshot")
+        risk_output = gr.Code(label="get_financial_risk_snapshot output", language="json")
         risk_btn.click(
             fn=get_financial_risk_snapshot,
-            inputs=risk_ticker,
+            inputs=[risk_ticker],
             outputs=risk_output,
             api_name="get_financial_risk_snapshot",
         )
 
 
 if __name__ == "__main__":
-    # HF Gradio Spaces normally manages server name and port automatically.
-    # These env vars make the same app runnable locally or in Docker as well.
     server_name = os.getenv("GRADIO_SERVER_NAME", "0.0.0.0")
-    server_port = int(os.getenv("PORT", os.getenv("GRADIO_SERVER_PORT", "7860")))
+    server_port = int(os.getenv("PORT", os.getenv("SPACE_PORT", "7860")))
 
-    demo.queue().launch(
+    logger.info("Starting Gradio MCP server on %s:%s", server_name, server_port)
+    logger.info("Expected MCP endpoints: /gradio_api/mcp/ and /gradio_api/mcp/sse")
+
+    # Do not use demo.queue().launch(...) here. Some Gradio/HF combinations have
+    # stricter launch signatures or queue interaction issues with mcp_server=True.
+    demo.launch(
         server_name=server_name,
         server_port=server_port,
         mcp_server=True,

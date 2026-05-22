@@ -1,87 +1,52 @@
-# Runbook: Hugging Face Gradio MCP Style Deployment
+# Runbook
 
-## 1. Create Space
-
-- SDK: Gradio
-- Visibility: Public, if OpenAI or external MCP clients need to call it
-- Upload:
-  - app.py
-  - requirements.txt
-  - README.md
-  - test_gradio_mcp_client.py
-  - openai_responses_example.py
-  - mcp_config_streamable_http.example.json
-  - mcp_config_stdio_bridge.example.json
-
-## 2. Expected Endpoint
-
-```txt
-https://<your-username>-<your-space-name>.hf.space/gradio_api/mcp/
-https://<your-username>-<your-space-name>.hf.space/gradio_api/mcp/sse
-```
-
-## 3. Important Difference vs Pure FastMCP Docker
-
-Pure FastMCP Docker endpoint:
-
-```txt
-/mcp
-```
-
-Hugging Face / Gradio MCP endpoint:
-
-```txt
-/gradio_api/mcp/
-/gradio_api/mcp/sse
-```
-
-## 4. Local Test
+## Local run
 
 ```bash
 pip install -r requirements.txt
 python app.py
 ```
 
-Then:
+Open:
+
+```txt
+http://localhost:7860
+```
+
+MCP endpoint:
+
+```txt
+http://localhost:7860/gradio_api/mcp/
+```
+
+## Remote test
 
 ```bash
-python test_gradio_mcp_client.py http://localhost:7860/gradio_api/mcp/
+pip install fastmcp
+python test_gradio_mcp_client.py https://<user>-<space>.hf.space/gradio_api/mcp/
 ```
 
-or:
+## Common errors
 
-```bash
-python test_gradio_mcp_client.py http://localhost:7860/gradio_api/mcp/sse
+### `unexpected keyword argument 'mcp_server'`
+
+Your Gradio version is too old or MCP extra is missing. Ensure:
+
+```txt
+gradio[mcp]>=5.49.0
 ```
 
-## 5. Client Config
+### Hugging Face push rejected: `short_description` too long
 
-For clients supporting URL MCP server:
+Keep `README.md` frontmatter `short_description` at 60 characters or less.
 
-```json
-{
-  "mcpServers": {
-    "hf-yfinance": {
-      "url": "https://<your-username>-<your-space-name>.hf.space/gradio_api/mcp/"
-    }
-  }
-}
+### MCP discovery timeout
+
+Try both endpoints:
+
+```txt
+/gradio_api/mcp/
+/gradio_api/mcp/sse
 ```
 
-For clients that only support stdio:
-
-```json
-{
-  "mcpServers": {
-    "hf-yfinance": {
-      "command": "npx",
-      "args": [
-        "mcp-remote",
-        "https://<your-username>-<your-space-name>.hf.space/gradio_api/mcp/sse",
-        "--transport",
-        "sse-only"
-      ]
-    }
-  }
-}
-```
+Some clients require the SSE path.

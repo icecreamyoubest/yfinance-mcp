@@ -49,13 +49,13 @@ jobs:
         run: |
           git clone https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO} hf-space
 
-      - name: Sync files to Hugging Face Space
+      - name: Sync minimal Space files
         run: |
           rsync -av --delete \
-            --exclude ".git" \
-            --exclude ".github" \
-            --exclude "hf-space" \
-            ./ hf-space/
+            app.py \
+            requirements.txt \
+            README.md \
+            hf-space/
 
       - name: Commit and push to Hugging Face Space
         working-directory: hf-space
@@ -63,7 +63,7 @@ jobs:
           git config user.email "actions@github.com"
           git config user.name "github-actions"
 
-          git add .
+          git add app.py requirements.txt README.md
 
           if git diff --cached --quiet; then
             echo "No changes to sync."

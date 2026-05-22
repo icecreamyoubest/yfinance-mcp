@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "hf-yfinance": {
-      "url": "https://<your-username>-<your-space-name>.hf.space/gradio_api/mcp/"
+    "hf-yfinance-cloud": {
+      "url": "https://yourusername-yfinance-mcp-service.hf.space/gradio_api/mcp/"
     }
   }
 }

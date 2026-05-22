@@ -1,73 +1,68 @@
-# GitHub → Hugging Face Spaces Sync Setup
+# GitHub to Hugging Face Spaces Sync Setup
 
-This repository contains a Gradio-style MCP server for Hugging Face Spaces.
+This repository includes a GitHub Actions workflow that syncs the minimal Hugging Face Space runtime files to your Space:
 
-## 1. Create a Hugging Face Space
+- `app.py`
+- `requirements.txt`
+- `README.md`
 
-Create a new Hugging Face Space with:
+## Required GitHub Actions settings
 
-- SDK: Gradio
-- Visibility: Public, if you want OpenAI / Dify / LangChain to access it remotely
-- Example Space repo id: `your-hf-username/yfinance-mcp-service`
-
-The MCP endpoint will be:
+Go to:
 
 ```txt
-https://<your-hf-username>-<your-space-name>.hf.space/gradio_api/mcp/
+GitHub Repository → Settings → Secrets and variables → Actions
 ```
 
-SSE endpoint:
-
-```txt
-https://<your-hf-username>-<your-space-name>.hf.space/gradio_api/mcp/sse
-```
-
-## 2. Add GitHub Secret
-
-In GitHub repository:
-
-```txt
-Settings → Secrets and variables → Actions → Secrets → New repository secret
-```
-
-Add:
+### Secret
 
 ```txt
 HF_TOKEN=<your Hugging Face write token>
 ```
 
-The token must have write permission to the target Hugging Face Space.
-
-## 3. Add GitHub Variable
-
-In GitHub repository:
+### Variable or Secret
 
 ```txt
-Settings → Secrets and variables → Actions → Variables → New repository variable
+HF_SPACE_REPO=<hf-username>/<space-name>
 ```
 
-Add:
+Example:
 
 ```txt
-HF_SPACE_REPO=your-hf-username/yfinance-mcp-service
+HF_SPACE_REPO=corinna/yfinance-mcp-service
 ```
 
-## 4. Trigger Sync
+Do not use the full URL. Use only `username/space-name`.
 
-Push to `main`, or manually trigger:
+## Hugging Face Space settings
+
+Create the Space as:
 
 ```txt
-Actions → Sync to Hugging Face Space → Run workflow
+SDK: Gradio
+Visibility: Public, if OpenAI or other public clients need to call it
 ```
 
-## 5. Verify MCP Endpoint
+The Space README metadata already uses:
 
-```bash
-python test_gradio_mcp_client.py https://<your-hf-username>-<your-space-name>.hf.space/gradio_api/mcp/
+```yaml
+sdk: gradio
+app_file: app.py
+short_description: Yahoo Finance MCP stock tools
 ```
 
-If your client requires SSE:
+The `short_description` is intentionally less than 60 characters to satisfy Hugging Face metadata validation.
 
-```bash
-python test_gradio_mcp_client.py https://<your-hf-username>-<your-space-name>.hf.space/gradio_api/mcp/sse
+## MCP endpoint
+
+After successful deployment:
+
+```txt
+https://<user>-<space>.hf.space/gradio_api/mcp/
+```
+
+SSE endpoint:
+
+```txt
+https://<user>-<space>.hf.space/gradio_api/mcp/sse
 ```

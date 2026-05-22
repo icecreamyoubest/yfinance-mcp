@@ -1,12 +1,14 @@
 {
   "mcpServers": {
-    "hf-yfinance": {
-      "command": "npx",
+    "hf-yfinance-cloud": {
+      "command": "uv",
       "args": [
-        "mcp-remote",
-        "https://<your-username>-<your-space-name>.hf.space/gradio_api/mcp/sse",
-        "--transport",
-        "sse-only"
+        "run",
+        "--with",
+        "fastmcp",
+        "fastmcp",
+        "connect",
+        "https://yourusername-yfinance-mcp-service.hf.space/gradio_api/mcp/"
       ]
     }
   }

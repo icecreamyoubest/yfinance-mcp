@@ -13,7 +13,9 @@ Hugging Face Spaces commonly exposes Gradio MCP servers through /gradio_api/mcp/
 from __future__ import annotations
 
 import json
+import concurrent.futures
 import logging
+from functools import lru_cache
 import os
 import time
 from typing import Any, Dict, List, Optional
@@ -26,6 +28,14 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("yfinance-gradio-mcp")
+
+# Configuration for network resilience
+YFINANCE_TIMEOUT_SECONDS = 10
+YFINANCE_MAX_RETRIES = 3
+YFINANCE_RETRY_DELAY_SECONDS = 2
+
+# Increased workers to prevent bottlenecks and handle concurrent requests better
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=20)
 
 
 # -----------------------------------------------------------------------------
@@ -106,9 +116,22 @@ def safe_percent(value: Any) -> Optional[str]:
     return f"{number * 100:.2f}%"
 
 
+@lru_cache(maxsize=128)
 def yahoo_info(ticker: str) -> Dict[str, Any]:
-    stock = yf.Ticker(ticker)
-    return stock.info or {}
+    """Fetch info directly to avoid nested executor deadlocks."""
+    for attempt in range(YFINANCE_MAX_RETRIES):
+        try:
+            stock = yf.Ticker(ticker)
+            # Accessing .info triggers the actual network request
+            info = stock.info
+            if info:
+                return info
+        except Exception as exc:
+            logger.error("Attempt %d: yfinance request failed for %s: %s", attempt + 1, ticker, exc)
+        
+        if attempt < YFINANCE_MAX_RETRIES - 1:
+            time.sleep(YFINANCE_RETRY_DELAY_SECONDS * (2 ** attempt))
+    return {}
 
 
 # -----------------------------------------------------------------------------
@@ -341,9 +364,23 @@ def compare_stocks(tickers: str) -> str:
         )
 
     results: List[Dict[str, Any]] = []
-    for ticker in ticker_list:
+    # Use the shared executor to fetch info for multiple tickers concurrently
+    futures = {executor.submit(yahoo_info, ticker): ticker for ticker in ticker_list}
+
+    for future in concurrent.futures.as_completed(futures):
+        ticker = futures[future]
         try:
-            info = yahoo_info(ticker)
+            info = future.result()
+            if not info:
+                results.append(
+                    {
+                        "ok": False,
+                        "ticker": ticker,
+                        "error": "No data returned from Yahoo Finance.",
+                    }
+                )
+                continue
+
             currency = info.get("currency") or "USD"
             current_price = (
                 info.get("currentPrice")
@@ -367,7 +404,7 @@ def compare_stocks(tickers: str) -> str:
                 }
             )
         except Exception as exc:
-            logger.exception("compare_stocks failed for ticker=%s", ticker)
+            logger.exception("compare_stocks failed for ticker=%s: %s", ticker, exc)
             results.append({"ok": False, "ticker": ticker, "error": str(exc)})
 
     return to_json(

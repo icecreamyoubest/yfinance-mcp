@@ -619,5 +619,4 @@ if __name__ == "__main__":
         server_name=server_name,
         server_port=server_port,
         mcp_server=True,
-        show_api=True,
     )
